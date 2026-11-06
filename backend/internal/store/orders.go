@@ -46,7 +46,7 @@ type OrderLine struct {
 
 type NewOrder struct {
 	Customer       string
-	Lines          []OrderLine // already shape-validated: non-empty, unique SKUs, qty > 0
+	Lines          []OrderLine
 	IdempotencyKey string
 }
 
@@ -56,8 +56,8 @@ type DailySales struct {
 	Total  int64  `json:"total"`
 }
 
-// CreateOrder is all-or-nothing: any early return rolls back the claim on the idempotency
-// key, every stock decrement and the order row itself. The bool reports an idempotent replay.
+// CreateOrder runs in one transaction, so any early return leaves nothing behind.
+// The bool reports an idempotent replay.
 func (s *Store) CreateOrder(ctx context.Context, in NewOrder) (Order, bool, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -65,13 +65,21 @@ func (s *Store) CreateOrder(ctx context.Context, in NewOrder) (Order, bool, erro
 	}
 	defer tx.Rollback(ctx)
 
-	// Inserting first means a concurrent retry with the same key blocks on the unique index
-	// until this transaction ends, then either replays our order or takes over after a rollback.
 	var key, hash *string
 	if in.IdempotencyKey != "" {
 		h := requestHash(in)
 		key, hash = &in.IdempotencyKey, &h
+		order, err := replayOrder(ctx, tx, *key, *hash)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return order, err == nil, err
+		}
 	}
+
+	if err := validateProducts(ctx, tx, in.Lines); err != nil {
+		return Order{}, false, err
+	}
+
+	// A concurrent retry with the same key blocks here on the unique index until this transaction ends.
 	var orderID int
 	err = tx.QueryRow(ctx, `
 		INSERT INTO sales_orders (customer, total, idempotency_key, request_hash) VALUES ($1, 0, $2, $3)
@@ -84,16 +92,11 @@ func (s *Store) CreateOrder(ctx context.Context, in NewOrder) (Order, bool, erro
 		return Order{}, false, err
 	}
 
-	if err := validateProducts(ctx, tx, in.Lines); err != nil {
-		return Order{}, false, err
-	}
-
-	// Lock rows in SKU order: two orders sharing SKUs can never wait on each other in a cycle.
+	// A fixed lock order: two orders sharing SKUs cannot deadlock.
 	lines := slices.SortedFunc(slices.Values(in.Lines), func(a, b OrderLine) int { return cmp.Compare(a.SKU, b.SKU) })
 
 	var total int64
 	for _, line := range lines {
-		// The price is read under the same row lock that takes the stock.
 		var productID, price int
 		err := tx.QueryRow(ctx, `
 			UPDATE products SET stock = stock - $2 WHERE sku = $1 AND stock >= $2
@@ -127,7 +130,6 @@ func (s *Store) CreateOrder(ctx context.Context, in NewOrder) (Order, bool, erro
 	return order, false, tx.Commit(ctx)
 }
 
-// validateProducts reports every unknown or inactive SKU at once, in the client's line order.
 func validateProducts(ctx context.Context, tx pgx.Tx, lines []OrderLine) error {
 	skus := make([]string, len(lines))
 	for i, line := range lines {
@@ -167,7 +169,7 @@ func validateProducts(ctx context.Context, tx pgx.Tx, lines []OrderLine) error {
 func insufficientOrMissing(ctx context.Context, tx pgx.Tx, sku string) error {
 	var available int
 	err := tx.QueryRow(ctx, `SELECT stock FROM products WHERE sku = $1`, sku).Scan(&available)
-	if errors.Is(err, pgx.ErrNoRows) { // deleted after validateProducts
+	if errors.Is(err, pgx.ErrNoRows) {
 		return &ValidationError{[]FieldError{{"items", fmt.Sprintf("unknown SKU %q", sku)}}}
 	}
 	if err != nil {
@@ -190,7 +192,6 @@ func replayOrder(ctx context.Context, tx pgx.Tx, key, hash string) (Order, error
 	return getOrder(ctx, tx, orderID)
 }
 
-// requestHash ignores line order, so a retry that reshuffles lines is still the same request.
 func requestHash(in NewOrder) string {
 	lines := make([]string, len(in.Lines))
 	for i, line := range in.Lines {
@@ -232,8 +233,6 @@ func getOrder(ctx context.Context, q querier, id int) (Order, error) {
 	return order, err
 }
 
-// CancelOrder flips the status with a guarded UPDATE, so of two concurrent cancels
-// exactly one restores stock.
 func (s *Store) CancelOrder(ctx context.Context, id int) (Order, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -295,7 +294,7 @@ func (s *Store) ListOrders(ctx context.Context, page, limit int) ([]OrderSummary
 	return orders, total, err
 }
 
-// DailySales counts non-cancelled orders for a date in Asia/Jakarta (today when date is nil).
+// DailySales reports non-cancelled orders for a date in Asia/Jakarta, or today when date is nil.
 func (s *Store) DailySales(ctx context.Context, date *string) (DailySales, error) {
 	var d DailySales
 	err := s.db.QueryRow(ctx, `

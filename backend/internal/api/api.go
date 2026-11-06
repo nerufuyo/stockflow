@@ -1,5 +1,4 @@
-// Package api is the HTTP layer: request parsing, validation of request shape, and the
-// translation of store errors into the JSON error envelope.
+// Package api is the HTTP layer of StockFlow.
 package api
 
 import (
@@ -13,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"stockflow/backend/internal/store"
 )
@@ -23,27 +23,25 @@ const (
 	maxBodyBytes = 1 << 20
 )
 
-type API struct{ store *store.Store }
+type server struct{ store *store.Store }
 
-// Handler returns the routes for the whole service.
 func Handler(s *store.Store) http.Handler {
-	a := &API{store: s}
+	srv := &server{store: s}
 	mux := http.NewServeMux()
 	route := func(pattern string, h handlerFunc) { mux.HandleFunc(pattern, wrap(h)) }
 
-	route("GET /healthz", a.health)
-	route("GET /api/products", a.listProducts)
-	route("GET /api/products/summary", a.productSummary)
-	route("POST /api/products", a.createProduct)
-	route("PUT /api/products/{id}", a.updateProduct)
-	route("DELETE /api/products/{id}", a.deleteProduct)
-	route("POST /api/products/{id}/stock", a.adjustStock)
-	route("GET /api/products/{id}/movements", a.listMovements)
-	route("GET /api/orders", a.listOrders)
-	route("POST /api/orders", a.createOrder)
-	route("GET /api/orders/{id}", a.getOrder)
-	route("POST /api/orders/{id}/cancel", a.cancelOrder)
-	route("GET /api/reports/daily-sales", a.dailySales)
+	route("GET /api/products", srv.listProducts)
+	route("GET /api/products/summary", srv.productSummary)
+	route("POST /api/products", srv.createProduct)
+	route("PUT /api/products/{id}", srv.updateProduct)
+	route("DELETE /api/products/{id}", srv.deleteProduct)
+	route("POST /api/products/{id}/stock", srv.adjustStock)
+	route("GET /api/products/{id}/movements", srv.listMovements)
+	route("GET /api/orders", srv.listOrders)
+	route("POST /api/orders", srv.createOrder)
+	route("GET /api/orders/{id}", srv.getOrder)
+	route("POST /api/orders/{id}/cancel", srv.cancelOrder)
+	route("GET /api/reports/daily-sales", srv.dailySales)
 	route("/", func(http.ResponseWriter, *http.Request) error { return store.ErrNotFound })
 	return mux
 }
@@ -58,13 +56,11 @@ func wrap(h handlerFunc) http.HandlerFunc {
 	}
 }
 
-// errorBody is the one error shape every endpoint returns. Available is a pointer because
-// 0 is a meaningful value that must still be serialized.
 type errorBody struct {
 	Code      string             `json:"code"`
 	Message   string             `json:"message"`
 	SKU       string             `json:"sku,omitempty"`
-	Available *int               `json:"available,omitempty"`
+	Available *int               `json:"available,omitempty"` // pointer: 0 must still be serialized
 	Details   []store.FieldError `json:"details,omitempty"`
 }
 
@@ -109,11 +105,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) error {
 	return json.NewEncoder(w).Encode(v)
 }
 
-func invalid(field, message string) error {
-	return &store.ValidationError{Details: []store.FieldError{{Field: field, Message: message}}}
+type fieldErrors []store.FieldError
+
+func (e *fieldErrors) add(field, message string) {
+	*e = append(*e, store.FieldError{Field: field, Message: message})
 }
 
-// decodeJSON turns malformed bodies and wrong types (e.g. a fractional price) into 400s.
+func (e fieldErrors) err() error {
+	if len(e) == 0 {
+		return nil
+	}
+	return &store.ValidationError{Details: e}
+}
+
+func invalid(field, message string) error {
+	var errs fieldErrors
+	errs.add(field, message)
+	return errs.err()
+}
+
+// storable reports whether Postgres can hold s in a text column.
+func storable(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, 0)
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(dst)
 	if err == nil {
@@ -124,14 +139,28 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 		if typeErr.Field == "" {
 			return invalid("body", "request body must be a JSON object")
 		}
-		expected := map[reflect.Kind]string{reflect.Int: "an integer", reflect.String: "a string", reflect.Bool: "a boolean", reflect.Slice: "an array"}
-		return invalid(typeErr.Field, fmt.Sprintf("%s must be %s", typeErr.Field, expected[typeErr.Type.Kind()]))
+		return invalid(typeErr.Field, fmt.Sprintf("%s must be %s", typeErr.Field, jsonTypeName(typeErr.Type.Kind())))
 	}
 	var tooBig *http.MaxBytesError
 	if errors.As(err, &tooBig) {
 		return invalid("body", "request body is too large")
 	}
 	return invalid("body", "request body must be valid JSON")
+}
+
+func jsonTypeName(kind reflect.Kind) string {
+	switch kind {
+	case reflect.Int:
+		return "an integer"
+	case reflect.String:
+		return "a string"
+	case reflect.Bool:
+		return "a boolean"
+	case reflect.Slice:
+		return "an array"
+	default:
+		return "an object"
+	}
 }
 
 // pathID treats anything that cannot be a row id as a row that does not exist.
@@ -143,22 +172,23 @@ func pathID(r *http.Request) (int, error) {
 	return int(id), nil
 }
 
-func paging(r *http.Request) (page, limit int, err error) {
-	parse := func(name string, fallback int) (int, error) {
-		raw := r.URL.Query().Get(name)
-		if raw == "" {
-			return fallback, nil
-		}
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > math.MaxInt32 {
-			return 0, invalid(name, name+" must be a positive integer")
-		}
-		return n, nil
+func positiveQuery(r *http.Request, name string, fallback int) (int, error) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return fallback, nil
 	}
-	if page, err = parse("page", 1); err != nil {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > math.MaxInt32 {
+		return 0, invalid(name, name+" must be a positive integer")
+	}
+	return n, nil
+}
+
+func paging(r *http.Request) (page, limit int, err error) {
+	if page, err = positiveQuery(r, "page", 1); err != nil {
 		return 0, 0, err
 	}
-	if limit, err = parse("limit", defaultLimit); err != nil {
+	if limit, err = positiveQuery(r, "limit", defaultLimit); err != nil {
 		return 0, 0, err
 	}
 	return page, min(limit, maxLimit), nil
@@ -171,14 +201,7 @@ type pageResponse[T any] struct {
 	Total int `json:"total"`
 }
 
-func (a *API) health(w http.ResponseWriter, r *http.Request) error {
-	if err := a.store.Ping(r.Context()); err != nil {
-		return err
-	}
-	return writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (a *API) listProducts(w http.ResponseWriter, r *http.Request) error {
+func (s *server) listProducts(w http.ResponseWriter, r *http.Request) error {
 	page, limit, err := paging(r)
 	if err != nil {
 		return err
@@ -190,9 +213,12 @@ func (a *API) listProducts(w http.ResponseWriter, r *http.Request) error {
 	default:
 		return invalid("status", "status must be one of active, inactive, low_stock")
 	}
-	products, total, err := a.store.ListProducts(r.Context(), store.ProductFilter{
-		Search: strings.ReplaceAll(strings.TrimSpace(q.Get("search")), "\x00", ""),
-		Status: status, Page: page, Limit: limit,
+	search := strings.TrimSpace(q.Get("search"))
+	if !storable(search) {
+		return invalid("search", "search contains invalid characters")
+	}
+	products, total, err := s.store.ListProducts(r.Context(), store.ProductFilter{
+		Search: search, Status: status, Page: page, Limit: limit,
 	})
 	if err != nil {
 		return err
@@ -200,8 +226,8 @@ func (a *API) listProducts(w http.ResponseWriter, r *http.Request) error {
 	return writeJSON(w, http.StatusOK, pageResponse[store.Product]{products, page, limit, total})
 }
 
-func (a *API) productSummary(w http.ResponseWriter, r *http.Request) error {
-	summary, err := a.store.ProductSummary(r.Context())
+func (s *server) productSummary(w http.ResponseWriter, r *http.Request) error {
+	summary, err := s.store.ProductSummary(r.Context())
 	if err != nil {
 		return err
 	}
@@ -217,41 +243,31 @@ type productRequest struct {
 
 func (req productRequest) validate() (store.ProductInput, error) {
 	in := store.ProductInput{SKU: strings.TrimSpace(req.SKU), Name: strings.TrimSpace(req.Name), IsActive: req.IsActive}
-	var details []store.FieldError
-	add := func(field, message string) {
-		details = append(details, store.FieldError{Field: field, Message: message})
-	}
-
+	var errs fieldErrors
 	if in.SKU == "" {
-		add("sku", "sku is required")
-	} else if hasNUL(in.SKU) {
-		add("sku", "sku contains invalid characters")
+		errs.add("sku", "sku is required")
+	} else if !storable(in.SKU) {
+		errs.add("sku", "sku contains invalid characters")
 	}
 	if in.Name == "" {
-		add("name", "name is required")
-	} else if hasNUL(in.Name) {
-		add("name", "name contains invalid characters")
+		errs.add("name", "name is required")
+	} else if !storable(in.Name) {
+		errs.add("name", "name contains invalid characters")
 	}
 	switch {
 	case req.Price == nil:
-		add("price", "price is required")
+		errs.add("price", "price is required")
 	case *req.Price < 0:
-		add("price", "price must be 0 or greater")
+		errs.add("price", "price must be 0 or greater")
 	case *req.Price > math.MaxInt32:
-		add("price", "price is too large")
+		errs.add("price", "price is too large")
 	default:
 		in.Price = *req.Price
 	}
-	if details != nil {
-		return in, &store.ValidationError{Details: details}
-	}
-	return in, nil
+	return in, errs.err()
 }
 
-// hasNUL guards text columns: Postgres rejects NUL bytes, which would otherwise surface as a 500.
-func hasNUL(s string) bool { return strings.ContainsRune(s, 0) }
-
-func (a *API) createProduct(w http.ResponseWriter, r *http.Request) error {
+func (s *server) createProduct(w http.ResponseWriter, r *http.Request) error {
 	var req productRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		return err
@@ -260,14 +276,14 @@ func (a *API) createProduct(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	product, err := a.store.CreateProduct(r.Context(), in)
+	product, err := s.store.CreateProduct(r.Context(), in)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusCreated, product)
 }
 
-func (a *API) updateProduct(w http.ResponseWriter, r *http.Request) error {
+func (s *server) updateProduct(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
 	if err != nil {
 		return err
@@ -280,125 +296,133 @@ func (a *API) updateProduct(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	product, err := a.store.UpdateProduct(r.Context(), id, in)
+	product, err := s.store.UpdateProduct(r.Context(), id, in)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, product)
 }
 
-func (a *API) deleteProduct(w http.ResponseWriter, r *http.Request) error {
+func (s *server) deleteProduct(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
 	if err != nil {
 		return err
 	}
-	if err := a.store.DeleteProduct(r.Context(), id); err != nil {
+	if err := s.store.DeleteProduct(r.Context(), id); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 
-func (a *API) adjustStock(w http.ResponseWriter, r *http.Request) error {
+type stockRequest struct {
+	Type string `json:"type"`
+	Qty  int    `json:"qty"`
+	Note string `json:"note"`
+}
+
+func (req stockRequest) validate() error {
+	var errs fieldErrors
+	if req.Type != "in" && req.Type != "out" {
+		errs.add("type", `type must be "in" or "out"`)
+	}
+	if req.Qty <= 0 || req.Qty > math.MaxInt32 {
+		errs.add("qty", "qty must be a positive integer")
+	}
+	if !storable(req.Note) {
+		errs.add("note", "note contains invalid characters")
+	}
+	return errs.err()
+}
+
+func (s *server) adjustStock(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
 	if err != nil {
 		return err
 	}
-	var req struct {
-		Type string `json:"type"`
-		Qty  int    `json:"qty"`
-		Note string `json:"note"`
-	}
+	var req stockRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		return err
 	}
-	var details []store.FieldError
-	if req.Type != "in" && req.Type != "out" {
-		details = append(details, store.FieldError{Field: "type", Message: `type must be "in" or "out"`})
-	}
-	if req.Qty <= 0 || req.Qty > math.MaxInt32 {
-		details = append(details, store.FieldError{Field: "qty", Message: "qty must be a positive integer"})
-	}
-	if hasNUL(req.Note) {
-		details = append(details, store.FieldError{Field: "note", Message: "note contains invalid characters"})
-	}
-	if details != nil {
-		return &store.ValidationError{Details: details}
+	if err := req.validate(); err != nil {
+		return err
 	}
 	var note *string
 	if trimmed := strings.TrimSpace(req.Note); trimmed != "" {
 		note = &trimmed
 	}
-	product, err := a.store.AdjustStock(r.Context(), id, req.Type, req.Qty, note)
+	product, err := s.store.AdjustStock(r.Context(), id, req.Type, req.Qty, note)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, product)
 }
 
-func (a *API) listMovements(w http.ResponseWriter, r *http.Request) error {
+func (s *server) listMovements(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
 	if err != nil {
 		return err
 	}
-	movements, err := a.store.ListMovements(r.Context(), id)
+	movements, err := s.store.ListMovements(r.Context(), id)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, map[string][]store.Movement{"data": movements})
 }
 
-func (a *API) createOrder(w http.ResponseWriter, r *http.Request) error {
-	var req struct {
-		Customer string `json:"customer"`
-		Items    []struct {
-			SKU string `json:"sku"`
-			Qty int    `json:"qty"`
-		} `json:"items"`
-	}
-	if err := decodeJSON(w, r, &req); err != nil {
-		return err
-	}
+type orderRequest struct {
+	Customer string `json:"customer"`
+	Items    []struct {
+		SKU string `json:"sku"`
+		Qty int    `json:"qty"`
+	} `json:"items"`
+}
 
-	order := store.NewOrder{Customer: strings.TrimSpace(req.Customer), IdempotencyKey: r.Header.Get("Idempotency-Key")}
-	var details []store.FieldError
-	add := func(field, message string) {
-		details = append(details, store.FieldError{Field: field, Message: message})
-	}
-
+func (req orderRequest) validate(idempotencyKey string) (store.NewOrder, error) {
+	order := store.NewOrder{Customer: strings.TrimSpace(req.Customer), IdempotencyKey: idempotencyKey}
+	var errs fieldErrors
 	if order.Customer == "" {
-		add("customer", "customer is required")
-	} else if hasNUL(order.Customer) {
-		add("customer", "customer contains invalid characters")
+		errs.add("customer", "customer is required")
+	} else if !storable(order.Customer) {
+		errs.add("customer", "customer contains invalid characters")
 	}
-	if len(order.IdempotencyKey) > 255 {
-		add("Idempotency-Key", "Idempotency-Key must be at most 255 characters")
+	if len(idempotencyKey) > 255 || !storable(idempotencyKey) {
+		errs.add("Idempotency-Key", "Idempotency-Key must be valid text of at most 255 bytes")
 	}
 	if len(req.Items) == 0 {
-		add("items", "items must not be empty")
+		errs.add("items", "items must not be empty")
 	}
 	seen := map[string]bool{}
 	for i, item := range req.Items {
 		sku := strings.TrimSpace(item.SKU)
+		field := fmt.Sprintf("items[%d]", i)
 		switch {
 		case sku == "":
-			add(fmt.Sprintf("items[%d].sku", i), fmt.Sprintf("item %d: sku is required", i+1))
-		case hasNUL(sku):
-			add(fmt.Sprintf("items[%d].sku", i), fmt.Sprintf("item %d: sku contains invalid characters", i+1))
+			errs.add(field+".sku", fmt.Sprintf("item %d: sku is required", i+1))
+		case !storable(sku):
+			errs.add(field+".sku", fmt.Sprintf("item %d: sku contains invalid characters", i+1))
 		case seen[sku]:
-			add(fmt.Sprintf("items[%d].sku", i), fmt.Sprintf("duplicate SKU %q", sku))
+			errs.add(field+".sku", fmt.Sprintf("duplicate SKU %q", sku))
 		}
 		seen[sku] = true
 		if item.Qty <= 0 || item.Qty > math.MaxInt32 {
-			add(fmt.Sprintf("items[%d].qty", i), fmt.Sprintf("item %d: qty must be a positive integer", i+1))
+			errs.add(field+".qty", fmt.Sprintf("item %d: qty must be a positive integer", i+1))
 		}
 		order.Lines = append(order.Lines, store.OrderLine{SKU: sku, Qty: item.Qty})
 	}
-	if details != nil {
-		return &store.ValidationError{Details: details}
-	}
+	return order, errs.err()
+}
 
-	created, replayed, err := a.store.CreateOrder(r.Context(), order)
+func (s *server) createOrder(w http.ResponseWriter, r *http.Request) error {
+	var req orderRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return err
+	}
+	order, err := req.validate(r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		return err
+	}
+	created, replayed, err := s.store.CreateOrder(r.Context(), order)
 	if err != nil {
 		return err
 	}
@@ -408,43 +432,43 @@ func (a *API) createOrder(w http.ResponseWriter, r *http.Request) error {
 	return writeJSON(w, http.StatusCreated, created)
 }
 
-func (a *API) getOrder(w http.ResponseWriter, r *http.Request) error {
+func (s *server) getOrder(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
 	if err != nil {
 		return err
 	}
-	order, err := a.store.GetOrder(r.Context(), id)
+	order, err := s.store.GetOrder(r.Context(), id)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, order)
 }
 
-func (a *API) cancelOrder(w http.ResponseWriter, r *http.Request) error {
+func (s *server) cancelOrder(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
 	if err != nil {
 		return err
 	}
-	order, err := a.store.CancelOrder(r.Context(), id)
+	order, err := s.store.CancelOrder(r.Context(), id)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, order)
 }
 
-func (a *API) listOrders(w http.ResponseWriter, r *http.Request) error {
+func (s *server) listOrders(w http.ResponseWriter, r *http.Request) error {
 	page, limit, err := paging(r)
 	if err != nil {
 		return err
 	}
-	orders, total, err := a.store.ListOrders(r.Context(), page, limit)
+	orders, total, err := s.store.ListOrders(r.Context(), page, limit)
 	if err != nil {
 		return err
 	}
 	return writeJSON(w, http.StatusOK, pageResponse[store.OrderSummary]{orders, page, limit, total})
 }
 
-func (a *API) dailySales(w http.ResponseWriter, r *http.Request) error {
+func (s *server) dailySales(w http.ResponseWriter, r *http.Request) error {
 	var date *string
 	if raw := r.URL.Query().Get("date"); raw != "" {
 		if _, err := time.Parse(time.DateOnly, raw); err != nil {
@@ -452,7 +476,7 @@ func (a *API) dailySales(w http.ResponseWriter, r *http.Request) error {
 		}
 		date = &raw
 	}
-	report, err := a.store.DailySales(r.Context(), date)
+	report, err := s.store.DailySales(r.Context(), date)
 	if err != nil {
 		return err
 	}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,18 +40,18 @@ func run() error {
 		Handler:           api.Handler(store.New(pool)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdown)
-	}()
-
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
 	slog.Info("listening", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+
+	select {
+	case err := <-serveErr:
 		return err
+	case <-ctx.Done():
 	}
-	return nil
+	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdown)
 }
 
 func env(name, fallback string) string {
