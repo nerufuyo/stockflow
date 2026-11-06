@@ -159,13 +159,9 @@ curl "$API/reports/daily-sales?date=2026-11-06"
 
 This was built in one Claude Code (AI) session, so the elapsed time says nothing about how long a person would need, and no human hours were spent writing the code.
 
-Checked during that session, against a local PostgreSQL 18 server (Compose uses 17):
+Checked during that session:
 
-- `go test ./...` passes. Removing the stock guard makes the overselling tests fail, which confirms they can catch the bug.
+- `docker compose up --build` from an empty volume brings up all three services with migrations and seed applied.
+- `docker compose run --rm backend-test` passes with the race detector on. Removing the stock guard makes the overselling tests fail, which confirms they can catch the bug.
 - `npm test`, `npm run build` and `oxlint` pass.
-- A scripted browser run through the Vite dev server passed all 33 checks across every screen, including the 409 and 400 displays, cancelling, and the error state with the backend stopped.
-
-Not yet run, because Docker Desktop on the build machine failed to start:
-
-- `docker compose up --build`, including both Dockerfiles and the nginx proxy. `docker compose config` does validate the file.
-- `go test -race`. The race build linked on Windows, but ThreadSanitizer could not allocate its memory there. Use `docker compose run --rm backend-test`.
+- A scripted browser run passed all 33 checks across every screen, both through the Vite dev server and through the Compose stack. It covers the 409 and 400 displays, cancelling, and the error state with the backend stopped.
