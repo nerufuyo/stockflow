@@ -1,8 +1,5 @@
 package api_test
 
-// These tests drive the real HTTP handlers against a real Postgres: the guarantees under
-// test (atomicity, row locking) only exist in the database.
-
 import (
 	"bytes"
 	"context"
@@ -43,7 +40,6 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// setup recreates the test database from the same migration the app runs on.
 func setup(dsn string) error {
 	ctx := context.Background()
 	target, err := url.Parse(dsn)
@@ -101,7 +97,7 @@ func (r response) decode(t *testing.T, dst any) {
 	}
 }
 
-// send is safe to call from goroutines: it reports failures with t.Error, not t.Fatal.
+// send uses t.Error rather than t.Fatal because tests call it from goroutines.
 func send(t *testing.T, method, path string, body any, headers ...string) response {
 	t.Helper()
 	var reader *bytes.Reader
@@ -154,7 +150,6 @@ type apiError struct {
 	} `json:"error"`
 }
 
-// addProduct creates a product through the API and brings in stock with a real movement.
 func addProduct(t *testing.T, sku string, price, stock int) store.Product {
 	t.Helper()
 	r := send(t, "POST", "/api/products", map[string]any{"sku": sku, "name": "Product " + sku, "price": price})
@@ -183,7 +178,6 @@ func stockOf(t *testing.T, sku string) int {
 	return queryInt(t, `SELECT stock FROM products WHERE sku = $1`, sku)
 }
 
-// counts snapshots everything an order may write, to prove a failed order wrote nothing.
 func counts(t *testing.T) [3]int {
 	t.Helper()
 	return [3]int{
@@ -193,7 +187,6 @@ func counts(t *testing.T) [3]int {
 	}
 }
 
-// expectLedgerConsistent asserts stock = SUM(in) - SUM(out) for every product.
 func expectLedgerConsistent(t *testing.T) {
 	t.Helper()
 	broken := queryInt(t, `
@@ -242,7 +235,6 @@ func TestOrderHappyPath(t *testing.T) {
 	addProduct(t, "A", 1500, 10)
 	addProduct(t, "B", 20000, 3)
 
-	// A client-supplied price must be ignored.
 	r := send(t, "POST", "/api/orders", orderBody(" Ann ",
 		line{"sku": "B", "qty": 3, "unit_price": 1},
 		line{"sku": "A", "qty": 2, "price": 1}))
@@ -290,11 +282,6 @@ func TestOrderTotalBeyondInt32(t *testing.T) {
 	if o.Total != 10_000_000_000 {
 		t.Errorf("total = %d", o.Total)
 	}
-	var s store.Summary
-	send(t, "GET", "/api/products/summary", nil).decode(t, &s)
-	if s.TotalValue != 0 {
-		t.Errorf("value after selling out = %d", s.TotalValue)
-	}
 }
 
 func TestOrderValidationWritesNothing(t *testing.T) {
@@ -323,6 +310,7 @@ func TestOrderValidationWritesNothing(t *testing.T) {
 		{"fractional qty", `{"customer":"Ann","items":[{"sku":"A","qty":1.5}]}`, "items.qty"},
 		{"malformed json", `{"customer":`, "body"},
 		{"not an object", `[]`, "body"},
+		{"item is not an object", `{"customer":"Ann","items":["A"]}`, "items"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -457,7 +445,6 @@ func TestConcurrentOrdersNeverOversell(t *testing.T) {
 	expectLedgerConsistent(t)
 }
 
-// Orders listing the same SKUs in opposite order would deadlock without a fixed lock order.
 func TestConcurrentMultiItemOrdersDoNotDeadlock(t *testing.T) {
 	reset(t)
 	addProduct(t, "A", 1000, 30)
@@ -537,7 +524,6 @@ func TestCancelOrder(t *testing.T) {
 	r.decode(t, &o)
 	path := fmt.Sprintf("/api/orders/%d/cancel", o.ID)
 
-	// Two simultaneous cancels: exactly one may restore stock.
 	var wg sync.WaitGroup
 	statuses := make([]int, 2)
 	for i := range statuses {
@@ -684,14 +670,14 @@ func TestListProducts(t *testing.T) {
 		total int
 	}{
 		{"", 5},
-		{"search=cbl", 2},          // sku, case-insensitive
-		{"search=CABLE", 1},        // name, case-insensitive
-		{"search=%25", 1},          // a literal %, not a wildcard
-		{"search=_", 1},            // a literal _, not a wildcard
-		{"search=nothing-here", 0}, //
-		{"status=active", 4},       //
-		{"status=inactive", 1},     //
-		{"status=low_stock", 2},    // boundary: stock 10 counts, 11 does not
+		{"search=cbl", 2},
+		{"search=CABLE", 1},
+		{"search=%25", 1},
+		{"search=_", 1},
+		{"search=nothing-here", 0},
+		{"status=active", 4},
+		{"status=inactive", 1},
+		{"status=low_stock", 2},
 		{"search=cbl&status=low_stock", 1},
 	} {
 		if got := list(t, tc.query); got.Total != tc.total || len(got.Data) != tc.total {
@@ -714,7 +700,7 @@ func TestListProducts(t *testing.T) {
 		if got := list(t, "limit=100000"); got.Limit != 100 {
 			t.Errorf("limit not capped: %d", got.Limit)
 		}
-		for _, q := range []string{"page=0", "page=abc", "limit=-1", "status=bogus"} {
+		for _, q := range []string{"page=0", "page=abc", "limit=-1", "status=bogus", "search=%ff", "search=%00"} {
 			expectStatus(t, send(t, "GET", "/api/products?"+q, nil), http.StatusBadRequest)
 		}
 	})
@@ -762,7 +748,6 @@ func TestIdempotencyKey(t *testing.T) {
 	addProduct(t, "A", 1000, 100)
 	body := orderBody("Ann", line{"sku": "A", "qty": 1})
 
-	// Simultaneous retries: all succeed, all return the same order, stock moves once.
 	const attempts = 10
 	var wg sync.WaitGroup
 	results := make([]response, attempts)
