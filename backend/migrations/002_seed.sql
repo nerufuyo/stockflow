@@ -1,6 +1,3 @@
--- Demo data. Every unit of stock is backed by a movement row, so the ledger invariant
--- stock = SUM(in) - SUM(out) holds from the first request onwards.
-
 INSERT INTO products (sku, name, price, stock, is_active) VALUES
     ('ELC-1001', 'USB-C Cable 1m',                   45000, 240, TRUE),
     ('ELC-1002', 'Wireless Mouse',                  185000,  64, TRUE),
@@ -23,7 +20,7 @@ SELECT id, 'in', stock, 'Opening balance', now() - interval '14 days'
 FROM products
 WHERE stock > 0;
 
--- Same writes as the API: decrement stock, record items and movements; a cancelled order puts the stock back.
+-- Performs the same writes as the API.
 CREATE OR REPLACE FUNCTION pg_temp.seed_order(p_customer TEXT, p_age INTERVAL, p_lines JSONB, p_cancelled_after INTERVAL DEFAULT NULL)
 RETURNS VOID LANGUAGE plpgsql AS $$
 DECLARE

@@ -8,12 +8,10 @@ services:
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
-      # ponytail: the image runs these once, on an empty volume. Add a migration tool when the schema must evolve.
       - ./backend/migrations:/docker-entrypoint-initdb.d:ro
       - db-data:/var/lib/postgresql/data
     healthcheck:
-      # -h forces TCP: the image's temporary init server listens on the socket only, so this stays
-      # unhealthy until migrations and seed have finished.
+      # TCP only: the image's temporary init server listens on the socket until migrations finish.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U stockflow -d stockflow"]
       interval: 2s
       timeout: 3s
@@ -36,7 +34,6 @@ services:
     depends_on:
       - backend
 
-  # docker compose run --rm backend-test    (the race detector needs cgo, which this image has)
   backend-test:
     profiles: [test]
     image: golang:1.26

@@ -1,11 +1,9 @@
--- Applied by the Postgres image on first start (see docker-compose.yml) and by the Go tests.
-
 CREATE TABLE products (
     id         SERIAL PRIMARY KEY,
     sku        TEXT NOT NULL UNIQUE,
     name       TEXT NOT NULL,
     price      INTEGER NOT NULL CHECK (price >= 0), -- IDR, integer: no float money
-    stock      INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0), -- last line of defence against overselling
+    stock      INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
     is_active  BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -19,17 +17,16 @@ CREATE TABLE stock_movements (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Serves both the movement history and the derived products.last_movement_at.
 CREATE INDEX stock_movements_product_recent_idx ON stock_movements (product_id, created_at DESC, id DESC);
 
 CREATE TABLE sales_orders (
     id              SERIAL PRIMARY KEY,
     customer        TEXT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'CREATED' CHECK (status IN ('CREATED', 'CANCELLED')),
-    total           BIGINT NOT NULL CHECK (total >= 0), -- BIGINT: INTEGER tops out near Rp 2.1 billion
+    total           BIGINT NOT NULL CHECK (total >= 0),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     cancelled_at    TIMESTAMPTZ,
-    idempotency_key TEXT UNIQUE, -- NULL when the client sent no Idempotency-Key
+    idempotency_key TEXT UNIQUE,
     request_hash    TEXT
 );
 
