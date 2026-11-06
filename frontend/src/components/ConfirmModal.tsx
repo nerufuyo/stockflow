@@ -2,7 +2,6 @@ import { useState, type ReactNode } from 'react'
 import { toApiError, type ApiError } from '../api/client'
 import { FormError, Modal } from './common'
 
-/** A confirmation whose action can fail: the backend's refusal stays visible in the dialog. */
 export function ConfirmModal({
   title,
   confirmLabel,

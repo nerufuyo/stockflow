@@ -8,7 +8,6 @@ import { ProductsPage } from './pages/ProductsPage'
 
 export default function App() {
   const route = useRoute()
-  // Bumped after every mutation; anything showing server data refetches when it changes.
   const [version, setVersion] = useState(0)
   const onMutated = useCallback(() => setVersion((n) => n + 1), [])
 

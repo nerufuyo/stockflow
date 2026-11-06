@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { api, toApiError, type ApiError } from '../api/client'
 import type { MovementType, Product } from '../api/types'
-import { parseQty, validateQty } from '../lib/validation'
+import { parseQty, QTY_ERROR } from '../lib/validation'
 import { FormError, Modal } from './common'
 
 export function AdjustStockModal({
@@ -12,7 +12,7 @@ export function AdjustStockModal({
 }: {
   product: Product
   onSaved: () => void
-  onStale: () => void // the list behind the dialog is out of date
+  onStale: () => void
   onClose: () => void
 }) {
   const [type, setType] = useState<MovementType>('in')
@@ -24,10 +24,9 @@ export function AdjustStockModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const invalid = validateQty(qty)
-    setQtyError(invalid)
     const parsed = parseQty(qty)
-    if (invalid || parsed === null) return
+    setQtyError(parsed === null ? QTY_ERROR : null)
+    if (parsed === null) return
 
     setSaving(true)
     setError(null)

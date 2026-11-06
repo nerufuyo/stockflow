@@ -1,18 +1,9 @@
 import { useState } from 'react'
 import { api } from '../api/client'
-import type { OrderStatus } from '../api/types'
-import { ErrorState, Loading } from '../components/common'
+import { ErrorState, Loading, OrderStatusBadge } from '../components/common'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { useAsync } from '../hooks/useAsync'
 import { formatDateTime, formatRupiah } from '../lib/format'
-
-export function OrderStatusBadge({ status }: { status: OrderStatus }) {
-  return (
-    <span className={`badge ${status === 'CREATED' ? 'badge-ok' : 'badge-danger'}`}>
-      {status === 'CREATED' ? 'Created' : 'Cancelled'}
-    </span>
-  )
-}
 
 export function OrderDetailPage({
   id,
@@ -119,7 +110,7 @@ export function OrderDetailPage({
             onMutated()
           }}
           onFailed={() => {
-            order.reload() // e.g. already cancelled elsewhere: show the true status behind the dialog
+            order.reload()
             onMutated()
           }}
           onClose={() => setConfirming(false)}

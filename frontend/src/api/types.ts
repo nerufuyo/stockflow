@@ -1,5 +1,3 @@
-// Shapes of the backend's JSON. Every component and the API client import domain types from here.
-
 export interface Product {
   id: number
   sku: string
@@ -13,7 +11,7 @@ export interface Product {
 
 export type ProductStatus = 'active' | 'inactive' | 'low_stock'
 
-export interface ProductQuery {
+export type ProductQuery = {
   search?: string
   status?: ProductStatus
   page?: number

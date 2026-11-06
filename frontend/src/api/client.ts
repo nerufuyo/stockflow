@@ -1,4 +1,3 @@
-// The only module that talks to the backend: it owns URLs, fetch and the error envelope.
 import type {
   DailySales,
   FieldError,
@@ -37,7 +36,6 @@ export class ApiError extends Error {
   }
 }
 
-/** Builds an ApiError from any failed response body, including non-JSON ones from a proxy. */
 export function parseErrorResponse(status: number, payload: unknown): ApiError {
   const error = isRecord(payload) && isRecord(payload.error) ? payload.error : null
   if (!error || typeof error.code !== 'string') {
@@ -58,7 +56,6 @@ function isFieldError(value: unknown): value is FieldError {
   return isRecord(value) && typeof value.field === 'string' && typeof value.message === 'string'
 }
 
-/** Normalizes anything thrown by a request for display. */
 export function toApiError(err: unknown): ApiError {
   return err instanceof ApiError ? err : new ApiError(0, 'UNKNOWN', err instanceof Error ? err.message : 'Unknown error')
 }
@@ -101,7 +98,7 @@ function queryString(params: Record<string, string | number | undefined>): strin
 
 export const api = {
   listProducts: (query: ProductQuery, signal?: AbortSignal) =>
-    request<Page<Product>>(`/products${queryString({ ...query })}`, { signal }),
+    request<Page<Product>>(`/products${queryString(query)}`, { signal }),
   productSummary: (signal?: AbortSignal) => request<ProductSummary>('/products/summary', { signal }),
   createProduct: (input: ProductInput) => request<Product>('/products', { method: 'POST', body: input }),
   updateProduct: (id: number, input: ProductInput) =>

@@ -1,8 +1,5 @@
-// Client-side checks mirror the API for fast feedback. The server still has the final say.
-
 const MAX_INT32 = 2147483647
 
-/** Whole-number parser: rejects "1.5", "1e3", "-1", "" and values the API would refuse. */
 function parseWholeNumber(raw: string): number | null {
   const text = raw.trim()
   if (!/^\d+$/.test(text)) return null
@@ -10,22 +7,14 @@ function parseWholeNumber(raw: string): number | null {
   return value <= MAX_INT32 ? value : null
 }
 
-/** Quantity: an integer greater than zero. */
 export function parseQty(raw: string): number | null {
   const value = parseWholeNumber(raw)
   return value !== null && value > 0 ? value : null
 }
 
-/** Price: an integer of zero or more. */
-export function parsePrice(raw: string): number | null {
-  return parseWholeNumber(raw)
-}
+export const parsePrice = parseWholeNumber
 
 export const QTY_ERROR = 'Quantity must be a whole number greater than 0'
-
-export function validateQty(raw: string): string | null {
-  return parseQty(raw) === null ? QTY_ERROR : null
-}
 
 export interface ProductFormValues {
   sku: string
@@ -65,8 +54,7 @@ export function validateOrderForm(customer: string, lines: OrderLineValues[]): O
     if (!sku) errors.lines[index].sku = 'SKU is required'
     else if (seen.has(sku)) errors.lines[index].sku = 'This SKU is already in the order'
     seen.add(sku)
-    const qtyError = validateQty(line.qty)
-    if (qtyError) errors.lines[index].qty = qtyError
+    if (parseQty(line.qty) === null) errors.lines[index].qty = QTY_ERROR
   })
   return errors
 }
@@ -75,7 +63,6 @@ export function hasOrderErrors(errors: OrderFormErrors): boolean {
   return Boolean(errors.customer || errors.items || errors.lines.some((line) => line.sku || line.qty))
 }
 
-/** Maps API detail fields such as "items[2].qty" back to the form line they belong to. */
 export function lineIndexFromField(field: string): number | null {
   const match = /^items\[(\d+)\]/.exec(field)
   return match ? Number(match[1]) : null

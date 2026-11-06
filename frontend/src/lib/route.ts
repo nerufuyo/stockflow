@@ -1,6 +1,5 @@
 import { useSyncExternalStore } from 'react'
 
-// ponytail: four routes fit a hash switch. Add react-router when routes need nesting or loaders.
 export type Route =
   | { name: 'products' }
   | { name: 'orders' }

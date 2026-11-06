@@ -9,7 +9,7 @@ export function ProductFormModal({
   onSaved,
   onClose,
 }: {
-  product: Product | null // null creates a new product
+  product: Product | null
   onSaved: () => void
   onClose: () => void
 }) {

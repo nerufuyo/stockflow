@@ -3,7 +3,6 @@ import { useAsync } from '../hooks/useAsync'
 import { formatRupiah } from '../lib/format'
 import { ErrorState } from './common'
 
-/** Numbers come from aggregate endpoints; the visible table page is never summed. */
 export function SummaryCards({ version }: { version: number }) {
   const summary = useAsync(
     (signal) => Promise.all([api.productSummary(signal), api.dailySales(signal)]),

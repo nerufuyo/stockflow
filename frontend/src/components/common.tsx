@@ -1,5 +1,14 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import type { ApiError } from '../api/client'
+import type { OrderStatus } from '../api/types'
+
+export function OrderStatusBadge({ status }: { status: OrderStatus }) {
+  return (
+    <span className={`badge ${status === 'CREATED' ? 'badge-ok' : 'badge-danger'}`}>
+      {status === 'CREATED' ? 'Created' : 'Cancelled'}
+    </span>
+  )
+}
 
 export function ErrorState({ error, onRetry }: { error: ApiError; onRetry: () => void }) {
   return (
@@ -40,7 +49,6 @@ export function Loading() {
   )
 }
 
-/** Shows a request failure inside a form, with the API's per-field messages when it sent any. */
 export function FormError({ error }: { error: ApiError | null }) {
   if (!error) return null
   return (
@@ -85,7 +93,6 @@ export function Pagination({
   )
 }
 
-/** Native <dialog>: focus trap, Esc and backdrop come from the browser. */
 export function Modal({
   title,
   busy = false,

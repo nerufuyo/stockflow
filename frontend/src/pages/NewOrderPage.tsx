@@ -6,7 +6,6 @@ import { formatRupiah } from '../lib/format'
 import {
   hasOrderErrors,
   lineIndexFromField,
-  parseQty,
   validateOrderForm,
   type OrderFormErrors,
   type OrderLineValues,
@@ -19,7 +18,7 @@ interface Line extends OrderLineValues {
 const NO_ERRORS: OrderFormErrors = { lines: [] }
 
 function newIdempotencyKey(): string {
-  // randomUUID only exists in secure contexts; the fallback covers plain http on a LAN address.
+  // randomUUID does not exist on plain http outside localhost.
   return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
 }
 
@@ -31,14 +30,13 @@ export function NewOrderPage({ onMutated }: { onMutated: () => void }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
 
-  // Kept across retries of an unchanged form, so a resubmit after a lost response cannot double-order.
-  const idempotencyKey = useRef<string | null>(null)
+  // Same form, same key: resubmitting after a lost response cannot double-order.
+  const attempt = useRef({ form: '', key: '' })
 
   const catalog = useAsync((signal) => api.listProducts({ status: 'active', limit: 100 }, signal), [])
   const productsBySku = new Map(catalog.data?.data.map((product) => [product.sku, product]))
 
   function editLine(id: number, change: Partial<OrderLineValues>) {
-    idempotencyKey.current = null
     setLines((current) => current.map((line) => (line.id === id ? { ...line, ...change } : line)))
   }
 
@@ -50,15 +48,14 @@ export function NewOrderPage({ onMutated }: { onMutated: () => void }) {
 
     setSaving(true)
     setError(null)
-    idempotencyKey.current ??= newIdempotencyKey()
+    const payload = {
+      customer: customer.trim(),
+      items: lines.map((line) => ({ sku: line.sku.trim(), qty: Number(line.qty) })),
+    }
+    const form = JSON.stringify(payload)
+    if (attempt.current.form !== form) attempt.current = { form, key: newIdempotencyKey() }
     try {
-      const order = await api.createOrder(
-        {
-          customer: customer.trim(),
-          items: lines.map((line) => ({ sku: line.sku.trim(), qty: parseQty(line.qty) ?? 0 })),
-        },
-        idempotencyKey.current,
-      )
+      const order = await api.createOrder(payload, attempt.current.key)
       onMutated()
       window.location.hash = `#/orders/${order.id}?created`
     } catch (err) {
@@ -83,10 +80,7 @@ export function NewOrderPage({ onMutated }: { onMutated: () => void }) {
             value={customer}
             autoFocus
             aria-invalid={Boolean(errors.customer)}
-            onChange={(event) => {
-              idempotencyKey.current = null
-              setCustomer(event.target.value)
-            }}
+            onChange={(event) => setCustomer(event.target.value)}
           />
           {errors.customer && <span className="field-error">{errors.customer}</span>}
         </label>
@@ -105,7 +99,7 @@ export function NewOrderPage({ onMutated }: { onMutated: () => void }) {
           const product = productsBySku.get(line.sku.trim())
           const failed = insufficient?.sku === line.sku.trim() || serverLines.has(index)
           return (
-            <div key={line.id} className={`order-line ${failed ? 'order-line-failed' : ''}`} data-sku={line.sku}>
+            <div key={line.id} className={`order-line ${failed ? 'order-line-failed' : ''}`}>
               <label className="field">
                 SKU
                 <input
@@ -116,7 +110,7 @@ export function NewOrderPage({ onMutated }: { onMutated: () => void }) {
                 />
                 {errors.lines[index]?.sku && <span className="field-error">{errors.lines[index].sku}</span>}
               </label>
-              <label className="field field-qty">
+              <label className="field">
                 Qty
                 <input
                   inputMode="numeric"
@@ -147,7 +141,6 @@ export function NewOrderPage({ onMutated }: { onMutated: () => void }) {
                 aria-label={`Remove item ${index + 1}`}
                 disabled={lines.length === 1}
                 onClick={() => {
-                  idempotencyKey.current = null
                   setErrors(NO_ERRORS)
                   setError(null)
                   setLines((current) => current.filter((other) => other.id !== line.id))
@@ -160,10 +153,7 @@ export function NewOrderPage({ onMutated }: { onMutated: () => void }) {
         })}
         <button
           type="button"
-          onClick={() => {
-            idempotencyKey.current = null
-            setLines((current) => [...current, { id: nextLineId.current++, sku: '', qty: '1' }])
-          }}
+          onClick={() => setLines((current) => [...current, { id: nextLineId.current++, sku: '', qty: '1' }])}
         >
           Add item
         </button>

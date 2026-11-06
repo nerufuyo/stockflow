@@ -1,9 +1,8 @@
 import { useState } from 'react'
 import { api } from '../api/client'
-import { EmptyState, ErrorState, Pagination, SkeletonRows } from '../components/common'
+import { EmptyState, ErrorState, OrderStatusBadge, Pagination, SkeletonRows } from '../components/common'
 import { useAsync } from '../hooks/useAsync'
 import { formatDateTime, formatRupiah } from '../lib/format'
-import { OrderStatusBadge } from './OrderDetailPage'
 
 const PAGE_SIZE = 10
 
