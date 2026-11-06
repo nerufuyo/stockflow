@@ -1,0 +1,56 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: stockflow
+      POSTGRES_PASSWORD: stockflow
+      POSTGRES_DB: stockflow
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      # ponytail: the image runs these once, on an empty volume. Add a migration tool when the schema must evolve.
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # -h forces TCP: the image's temporary init server listens on the socket only, so this stays
+      # unhealthy until migrations and seed have finished.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U stockflow -d stockflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgres://stockflow:stockflow@db:5432/stockflow?sslmode=disable
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+
+  # docker compose run --rm backend-test    (the race detector needs cgo, which this image has)
+  backend-test:
+    profiles: [test]
+    image: golang:1.26
+    working_dir: /src
+    command: go test -race -count=1 ./...
+    environment:
+      TEST_DATABASE_URL: postgres://stockflow:stockflow@db:5432/stockflow_test?sslmode=disable
+    volumes:
+      - ./backend:/src
+      - go-cache:/go
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db-data:
+  go-cache:
